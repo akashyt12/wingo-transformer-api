@@ -310,9 +310,24 @@ class Predictor:
                 s *= 1.3
             final_scores[n] = round(s, 2)
 
-        # --- Pick top 5 numbers ---
+        # --- Pick top 5 numbers with BIG/SMALL majority ---
         sorted_nums = sorted(final_scores, key=final_scores.get, reverse=True)
-        top5 = sorted_nums[:5]
+
+        if tf_hint == "BIG":
+            big_nums = [n for n in sorted_nums if n >= 5]
+            small_nums = [n for n in sorted_nums if n <= 4]
+            top5 = big_nums[:3] + small_nums[:2]
+            if len(top5) < 5:
+                top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
+        elif tf_hint == "SMALL":
+            small_nums = [n for n in sorted_nums if n <= 4]
+            big_nums = [n for n in sorted_nums if n >= 5]
+            top5 = small_nums[:3] + big_nums[:2]
+            if len(top5) < 5:
+                top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
+        else:
+            top5 = sorted_nums[:5]
+
         best_num = top5[0]
         max_score = max(final_scores.values())
         confidence = round((final_scores[best_num] / max(max_score, 1)) * 100, 1)
