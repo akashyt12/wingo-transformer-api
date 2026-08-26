@@ -215,13 +215,13 @@ def get_suggested_numbers(feat):
     s2o = sum2 % 2 == 1
     s3o = sum3 % 2 == 1
     if s2o and s3o:
-        return [6, 8]
+        return [6, 8, 0]
     elif not s2o and not s3o:
-        return [2, 4]
+        return [2, 4, 5]
     elif s2o and not s3o:
-        return [1, 3]
+        return [1, 3, 5]
     else:
-        return [7, 9]
+        return [7, 9, 0]
 
 # ============================================================
 # ENSEMBLE PREDICTOR (Transformer + 10-Feature)
