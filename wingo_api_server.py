@@ -1,22 +1,27 @@
 """
-WinGo Transformer v5 - 10 Feature + Transformer Ensemble
-Rolling buffer + Live prediction
+WinGo Predictor v9 - Markov + XGBoost + Random Forest
+3 AI Models with Majority Voting - Number Prediction 0-9
 """
 import os
 import json
-import math
 import time
+import random
 import urllib.request
 import threading
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+from collections import Counter
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+# XGBoost
+from xgboost import XGBClassifier
+
+# Sklearn
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.preprocessing import LabelEncoder
+
 # ============================================================
-# GAME DATA - BRIGHT-HOST-SPOT API
+# GAME DATA - LIVE API
 # ============================================================
 
 GAME_API_BASE = "https://bright-host-spot.lovable.app/api/public"
@@ -31,7 +36,7 @@ class GameDataBuffer:
     def __init__(self):
         self.cache = {}
         self.lock = threading.Lock()
-        self.max_size = 25
+        self.max_size = 50
 
     def fetch_latest(self, game_key="30s"):
         endpoint = GAME_ENDPOINTS.get(game_key, "WinGo_30S")
@@ -79,12 +84,10 @@ class GameDataBuffer:
             issues = [r["issue"] for r in data]
             return nums[-count:], issues[-count:]
 
-    def get_numbers_display(self, game_key="30s", count=20):
+    def get_all(self, game_key="30s"):
         with self.lock:
             data = self.cache.get(game_key, [])
-            nums = [r["number"] for r in data][::-1]
-            issues = [r["issue"] for r in data][::-1]
-            return nums[:count], issues[:count]
+            return [r["number"] for r in data], [r["issue"] for r in data]
 
     def init_cache(self):
         for game in GAME_ENDPOINTS:
@@ -94,224 +97,284 @@ class GameDataBuffer:
 buffer = GameDataBuffer()
 
 # ============================================================
-# MODEL v2 ARCHITECTURE (original transformer)
+# MODEL 1: MARKOV CHAIN
 # ============================================================
 
-SEQUENCE_LEN = 20
-EMBED_DIM = 64
-NUM_HEADS = 4
-NUM_LAYERS = 2
-DROPOUT = 0.1
-DEVICE = "cpu"
+class MarkovModel:
+    def __init__(self, order=2):
+        self.order = order
+        self.transitions = {}
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=500):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(pos * div)
-        pe[:, 1::2] = torch.cos(pos * div)
-        self.register_buffer('pe', pe.unsqueeze(0))
+    def train(self, numbers):
+        self.transitions = {}
+        for i in range(len(numbers) - self.order):
+            state = tuple(numbers[i:i + self.order])
+            next_num = numbers[i + self.order]
+            if state not in self.transitions:
+                self.transitions[state] = Counter()
+            self.transitions[state][next_num] += 1
 
-    def forward(self, x):
-        return x + self.pe[:, :x.size(1)]
-
-class WinGoTransformer(nn.Module):
-    def __init__(self, embed_dim=64, num_heads=4, num_layers=2, dropout=0.1, seq_len=20):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.seq_len = seq_len
-        self.number_embed = nn.Embedding(11, embed_dim, padding_idx=0)
-        self.digit_embed = nn.Embedding(10, embed_dim // 4)
-        self.dig_proj = nn.Linear(embed_dim // 4 * 3, embed_dim)
-        self.pos_encoder = PositionalEncoding(embed_dim, max_len=seq_len + 10)
-        self.volatility_proj = nn.Linear(3, embed_dim // 4)
-        self.combine_proj = nn.Linear(embed_dim + embed_dim // 4, embed_dim)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim, nhead=num_heads, dim_feedforward=embed_dim * 4,
-            dropout=dropout, batch_first=True, activation='gelu'
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.norm = nn.LayerNorm(embed_dim)
-        self.head_bs = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim), nn.GELU(), nn.Dropout(dropout),
-            nn.Linear(embed_dim, 2)
-        )
-
-    def forward(self, x):
-        emb = self.number_embed(x)
-        tens = x.unsqueeze(-1).expand(-1, -1, 3)
-        ones = tens % 10
-        tens = tens // 10
-        digs = torch.cat([self.digit_embed(ones[:,:,0]),
-                          self.digit_embed(ones[:,:,1]),
-                          self.digit_embed(ones[:,:,2])], dim=-1)
-        feat_list = []
-        for i in range(x.size(1)):
-            win = x[:, max(0, i-9):i+1]
-            mean = win.float().mean(dim=1, keepdim=True)
-            std = win.float().std(dim=1, keepdim=True, unbiased=False).clamp(min=0.1)
-            last3 = win[:, -3:].float().mean(dim=1, keepdim=True) if win.size(1) >= 3 else mean
-            feat_list.append(torch.cat([mean, std, last3], dim=1))
-        vol_feats = torch.stack(feat_list, dim=1)
-        vol_proj = self.volatility_proj(vol_feats)
-        combined = torch.cat([emb + self.dig_proj(digs), vol_proj], dim=-1)
-        x = self.combine_proj(combined)
-        x = self.pos_encoder(x)
-        x = self.transformer(x)
-        x = self.norm(x[:, -1, :])
-        return self.head_bs(x)
+    def predict(self, numbers):
+        if len(numbers) < self.order:
+            return None, {}
+        state = tuple(numbers[-self.order:])
+        if state not in self.transitions:
+            return None, {}
+        total = sum(self.transitions[state].values())
+        probs = {}
+        for n in range(10):
+            probs[n] = round(self.transitions[state].get(n, 0) / total * 100, 1)
+        best = max(self.transitions[state], key=self.transitions[state].get)
+        return best, probs
 
 # ============================================================
-# 10-FEATURE MODEL (NEW)
+# FEATURE ENGINEERING
 # ============================================================
 
-class TenFeatureNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(10, 32),
-            nn.ReLU(),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-def extract_10_features(numbers, idx, seq_len=10):
-    if idx < seq_len:
+def build_features(numbers, idx, window=10):
+    if idx < window:
         return None
-    w = numbers[idx - seq_len:idx]
-    sum2 = sum(w[-2:])
-    sum3 = sum(w[-3:])
-    sum4 = sum(w[-4:])
-    sum5 = sum(w[-5:])
-    sum6 = sum(w[-6:])
-    sum7 = sum(w[-7:])
-    s2o = sum2 % 2 == 1
-    s3o = sum3 % 2 == 1
-    if s2o and s3o:
-        f4 = 1
-    elif not s2o and not s3o:
-        f4 = 0
-    elif s2o and not s3o:
-        f4 = 0
-    else:
-        f4 = 1
+    w = numbers[idx - window:idx + 1]
+    feats = []
+
+    # Last number
+    feats.append(w[-1])
+
+    # Frequency of each digit in window (10 features)
+    for d in range(10):
+        feats.append(w.count(d))
+
+    # Position of last occurrence of each digit (10 features)
+    for d in range(10):
+        pos = -1
+        for i in range(len(w) - 1, -1, -1):
+            if w[i] == d:
+                pos = len(w) - 1 - i
+                break
+        feats.append(pos if pos >= 0 else window + 1)
+
+    # Gap since each digit last appeared (10 features)
+    for d in range(10):
+        gap = 0
+        for i in range(len(w) - 1, -1, -1):
+            if w[i] == d:
+                break
+            gap += 1
+        feats.append(gap)
+
+    # Sum features
+    feats.append(sum(w[-2:]))
+    feats.append(sum(w[-3:]))
+    feats.append(sum(w[-5:]))
+
+    # Mean
+    feats.append(round(np.mean(w), 2))
+
+    # Std
+    feats.append(round(np.std(w), 2))
+
+    # Is even/odd
+    feats.append(w[-1] % 2)
+    feats.append(sum(w[-2:]) % 2)
+    feats.append(sum(w[-3:]) % 2)
+
+    # Repeat count
     streak = 0
     for i in range(len(w) - 1, -1, -1):
         if w[i] == w[-1]:
             streak += 1
         else:
             break
-    return [sum2, sum3, sum4, sum5, sum6, sum7, f4, w[-1], abs(w[-1] - w[-2]), streak]
+    feats.append(streak)
 
-def get_suggested_numbers(feat):
-    sum2 = feat[0]
-    sum3 = feat[1]
-    s2o = sum2 % 2 == 1
-    s3o = sum3 % 2 == 1
-    if s2o and s3o:
-        return [6, 8, 0]
-    elif not s2o and not s3o:
-        return [2, 4, 5]
-    elif s2o and not s3o:
-        return [1, 3, 5]
-    else:
-        return [7, 9, 0]
+    # Diff features
+    feats.append(abs(w[-1] - w[-2]))
+    feats.append(abs(w[-1] - w[-3]))
+
+    return feats
 
 # ============================================================
-# ENSEMBLE PREDICTOR (Transformer + 10-Feature)
+# MODEL 2: XGBOOST
 # ============================================================
 
-class Predictor:
+class XGBoostModel:
     def __init__(self):
-        self.tf_models = {}
-        self.feat_model = None
+        self.model = None
+        self.trained = False
+
+    def train(self, numbers, window=10):
+        X, y = [], []
+        for i in range(window, len(numbers) - 1):
+            feat = build_features(numbers, i, window)
+            if feat is not None:
+                X.append(feat)
+                y.append(numbers[i + 1])
+        if len(X) < 50:
+            return False
+        X = np.array(X)
+        y = np.array(y)
+        self.model = XGBClassifier(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            use_label_encoder=False,
+            eval_metric='mlogloss',
+            random_state=42,
+            verbosity=0
+        )
+        self.model.fit(X, y)
+        self.trained = True
+        return True
+
+    def predict(self, numbers, window=10):
+        if not self.trained or len(numbers) < window:
+            return None, {}
+        feat = build_features(numbers, len(numbers) - 1, window)
+        if feat is None:
+            return None, {}
+        X = np.array([feat])
+        probs = self.model.predict_proba(X)[0]
+        classes = self.model.classes_
+        prob_dict = {}
+        for i, c in enumerate(classes):
+            prob_dict[int(c)] = round(float(probs[i]) * 100, 1)
+        # Fill missing
+        for n in range(10):
+            if n not in prob_dict:
+                prob_dict[n] = 0.0
+        best = int(classes[np.argmax(probs)])
+        return best, prob_dict
+
+# ============================================================
+# MODEL 3: RANDOM FOREST + GRADIENT BOOSTING (ENSEMBLE)
+# ============================================================
+
+class SklearnEnsemble:
+    def __init__(self):
+        self.rf = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42)
+        self.gb = GradientBoostingClassifier(n_estimators=150, max_depth=5, random_state=42)
+        self.trained = False
+
+    def train(self, numbers, window=10):
+        X, y = [], []
+        for i in range(window, len(numbers) - 1):
+            feat = build_features(numbers, i, window)
+            if feat is not None:
+                X.append(feat)
+                y.append(numbers[i + 1])
+        if len(X) < 50:
+            return False
+        X = np.array(X)
+        y = np.array(y)
+        self.rf.fit(X, y)
+        self.gb.fit(X, y)
+        self.trained = True
+        return True
+
+    def predict(self, numbers, window=10):
+        if not self.trained or len(numbers) < window:
+            return None, {}
+        feat = build_features(numbers, len(numbers) - 1, window)
+        if feat is None:
+            return None, {}
+        X = np.array([feat])
+
+        # RF prediction
+        rf_probs = self.rf.predict_proba(X)[0]
+        rf_classes = self.rf.classes_
+
+        # GB prediction
+        gb_probs = self.gb.predict_proba(X)[0]
+        gb_classes = self.gb.classes_
+
+        # Average probabilities
+        avg_probs = {}
+        for n in range(10):
+            p1 = 0.0
+            p2 = 0.0
+            if n in rf_classes:
+                p1 = float(rf_probs[list(rf_classes).index(n)])
+            if n in gb_classes:
+                p2 = float(gb_probs[list(gb_classes).index(n)])
+            avg_probs[n] = round((p1 + p2) / 2 * 100, 1)
+
+        best = max(avg_probs, key=avg_probs.get)
+        return best, avg_probs
+
+# ============================================================
+# MAJORITY VOTING ENSEMBLE
+# ============================================================
+
+class EnsemblePredictor:
+    def __init__(self):
+        self.markov = MarkovModel(order=2)
+        self.xgb = XGBoostModel()
+        self.sklearn = SklearnEnsemble()
         self.ready = False
 
-    def load_models(self):
-        for game in ["1m", "30s"]:
-            try:
-                model = WinGoTransformer(
-                    embed_dim=EMBED_DIM, num_heads=NUM_HEADS,
-                    num_layers=NUM_LAYERS, dropout=DROPOUT, seq_len=SEQUENCE_LEN
-                ).to(DEVICE)
-                path = os.path.join(os.path.dirname(__file__), f"wingo_transformer_{game}.pt")
-                model.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
-                model.eval()
-                self.tf_models[game] = model
-                print(f"  [OK] Transformer {game} loaded")
-            except Exception as e:
-                print(f"  [FAIL] Transformer {game}: {e}")
+    def train_all(self, numbers):
+        print("  [TRAINING] Markov...")
+        self.markov.train(numbers)
+        print("  [TRAINING] XGBoost...")
+        ok1 = self.xgb.train(numbers)
+        print(f"  [XGBoost] {'OK' if ok1 else 'FAILED'}")
+        print("  [TRAINING] Sklearn Ensemble (RF + GB)...")
+        ok2 = self.sklearn.train(numbers)
+        print(f"  [Sklearn] {'OK' if ok2 else 'FAILED'}")
+        self.ready = True
+        print("  [READY] All models trained!")
 
-        try:
-            self.feat_model = TenFeatureNet()
-            path = os.path.join(os.path.dirname(__file__), "wingo_10feat_best.pt")
-            self.feat_model.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
-            self.feat_model.eval()
-            print("  [OK] 10-Feature model loaded")
-        except Exception as e:
-            print(f"  [FAIL] 10-Feature: {e}")
-
-        self.ready = len(self.tf_models) > 0 or self.feat_model is not None
-
-    def predict_with_numbers(self, numbers, game="30s"):
+    def predict(self, numbers, game="30s"):
         if not self.ready:
-            return {"error": "Models not loaded"}
+            return {"error": "Models not trained"}
         if len(numbers) < 10:
             return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
 
-        # --- Frequency analysis (last 20 numbers) ---
-        recent = numbers[-20:]
-        freq = {}
+        # Get predictions from all 3 models
+        m1_num, m1_probs = self.markov.predict(numbers)
+        m2_num, m2_probs = self.xgb.predict(numbers)
+        m3_num, m3_probs = self.sklearn.predict(numbers)
+
+        votes = {}
+        all_probs = {}
+
+        if m1_num is not None:
+            votes["markov"] = m1_num
+            all_probs["markov"] = m1_probs
+        if m2_num is not None:
+            votes["xgboost"] = m2_num
+            all_probs["xgboost"] = m2_probs
+        if m3_num is not None:
+            votes["sklearn"] = m3_num
+            all_probs["sklearn"] = m3_probs
+
+        if not votes:
+            return {"error": "All models failed"}
+
+        # --- Majority voting ---
+        vote_counts = Counter(votes.values())
+        majority_num = vote_counts.most_common(1)[0][0]
+        majority_count = vote_counts.most_common(1)[0][1]
+
+        # --- Combined probability (average all models) ---
+        combined_probs = {}
         for n in range(10):
-            freq[n] = recent.count(n)
+            p_list = []
+            for model_name, probs in all_probs.items():
+                if n in probs:
+                    p_list.append(probs[n])
+            combined_probs[n] = round(np.mean(p_list), 1) if p_list else 0.0
 
-        # --- Weighted score: recent numbers matter more ---
-        scores = {}
-        for n in range(10):
-            score = 0
-            for i, num in enumerate(recent):
-                if num == n:
-                    score += (i + 1)  # more recent = higher weight
-            scores[n] = score
+        # --- Confidence ---
+        confidence = round(majority_count / len(votes) * 100, 1)
 
-        # --- Gap analysis: numbers that haven't appeared in a while ---
-        gaps = {}
-        for n in range(10):
-            gap = 0
-            for i in range(len(recent) - 1, -1, -1):
-                if recent[i] == n:
-                    break
-                gap += 1
-            gaps[n] = gap
+        # --- Top 5 numbers with BIG/SMALL majority ---
+        sorted_nums = sorted(combined_probs, key=combined_probs.get, reverse=True)
 
-        # --- Transformer BIG/SMALL hint ---
-        model = self.tf_models.get(game, self.tf_models.get("1m"))
-        tf_hint = None
-        if model and len(numbers) >= SEQUENCE_LEN:
-            seq = numbers[-SEQUENCE_LEN:]
-            x = torch.tensor([seq], dtype=torch.long).to(DEVICE)
-            with torch.no_grad():
-                bs_logits = model(x)
-            tf_hint = "BIG" if bs_logits.argmax(1).item() == 1 else "SMALL"
-
-        # --- Combine scores ---
-        final_scores = {}
-        for n in range(10):
-            s = scores[n] * 2 + gaps[n] * 1.5 + freq[n] * 3
-            if tf_hint == "BIG" and n >= 5:
-                s *= 1.3
-            elif tf_hint == "SMALL" and n <= 4:
-                s *= 1.3
-            final_scores[n] = round(s, 2)
-
-        # --- Pick top 5 numbers with BIG/SMALL majority ---
-        sorted_nums = sorted(final_scores, key=final_scores.get, reverse=True)
+        # Determine hint from combined scores
+        big_score = sum(combined_probs.get(n, 0) for n in range(5, 10))
+        small_score = sum(combined_probs.get(n, 0) for n in range(0, 5))
+        tf_hint = "BIG" if big_score > small_score else "SMALL"
 
         if tf_hint == "BIG":
             big_nums = [n for n in sorted_nums if n >= 5]
@@ -319,45 +382,61 @@ class Predictor:
             top5 = big_nums[:3] + small_nums[:2]
             if len(top5) < 5:
                 top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
-        elif tf_hint == "SMALL":
+        else:
             small_nums = [n for n in sorted_nums if n <= 4]
             big_nums = [n for n in sorted_nums if n >= 5]
             top5 = small_nums[:3] + big_nums[:2]
             if len(top5) < 5:
                 top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
-        else:
-            top5 = sorted_nums[:5]
-
-        best_num = top5[0]
-        max_score = max(final_scores.values())
-        confidence = round((final_scores[best_num] / max(max_score, 1)) * 100, 1)
-        confidence = min(confidence, 95.0)
 
         return {
-            "prediction": str(best_num),
-            "number": best_num,
+            "prediction": str(majority_num),
+            "number": majority_num,
             "suggested_numbers": top5,
             "confidence": confidence,
-            "scores": final_scores,
+            "models": votes,
+            "model_confidences": {
+                "markov": m1_probs.get(m1_num, 0) if m1_num is not None else 0,
+                "xgboost": m2_probs.get(m2_num, 0) if m2_num is not None else 0,
+                "sklearn": m3_probs.get(m3_num, 0) if m3_num is not None else 0,
+            },
+            "combined_probs": combined_probs,
             "tf_hint": tf_hint,
+            "vote_counts": dict(vote_counts),
             "game": game,
             "sequence": numbers[-10:],
         }
 
     def auto_predict(self, game="30s"):
         buffer.update(game)
-        nums_model, issues_model = buffer.get_numbers(game, count=20)
-        nums_display, issues_display = buffer.get_numbers_display(game, count=10)
-        if len(nums_model) < 10:
-            return {"error": "Not enough data", "cached": len(nums_model)}
-        result = self.predict_with_numbers(nums_model, game)
+        nums, issues = buffer.get_numbers(game, count=50)
+        nums_display, issues_display = buffer.get_numbers(game, count=10)
+        if len(nums) < 10:
+            return {"error": "Not enough data", "cached": len(nums)}
+        result = self.predict(nums, game)
         result["source"] = "bright-host-spot_live"
-        result["cached_records"] = len(nums_model)
-        result["latest_period"] = issues_display[0] if issues_display else "unknown"
+        result["cached_records"] = len(nums)
+        result["latest_period"] = issues[-1] if issues else "unknown"
         result["recent_numbers"] = nums_display
         return result
 
-predictor = Predictor()
+predictor = EnsemblePredictor()
+
+# ============================================================
+# AUTO RETRAIN (every 5 minutes)
+# ============================================================
+
+def auto_retrain():
+    while True:
+        time.sleep(300)
+        try:
+            for game in ["30s", "1m"]:
+                nums, _ = buffer.get_all(game)
+                if len(nums) >= 30:
+                    predictor.train_all(nums)
+                    print(f"  [RETRAINED] {game} - {len(nums)} records")
+        except Exception as e:
+            print(f"  [RETRAIN ERROR] {e}")
 
 # ============================================================
 # FLASK APP
@@ -369,21 +448,22 @@ CORS(app)
 @app.route('/')
 def home():
     return jsonify({
-        "name": "WinGo Transformer v5 - 10 Feature + Ensemble",
-        "version": "5.0",
+        "name": "WinGo Predictor v9 - Markov + XGBoost + Sklearn",
+        "version": "9.0",
         "status": "ready" if predictor.ready else "loading",
-        "buffer_size": len(buffer.cache.get("30s", [])),
         "models": {
-            "transformer": list(predictor.tf_models.keys()),
-            "ten_feature": predictor.feat_model is not None,
+            "markov": True,
+            "xgboost": predictor.xgb.trained,
+            "sklearn_rf_gb": predictor.sklearn.trained,
         },
+        "buffer_size": len(buffer.cache.get("30s", [])),
         "endpoints": {
             "GET /": "This page",
-            "GET /status": "Model + buffer status",
-            "GET /predict/auto?game=30s": "Live predict (ensemble!)",
+            "GET /status": "Model status",
+            "GET /predict/auto?game=30s": "Live predict (3 models + majority vote)",
             "GET /predict?game=30s&numbers=1,2,3,...": "Predict with your numbers",
             "GET /buffer?game=30s": "View cached numbers",
-            "GET /refresh?game=30s": "Force refresh buffer",
+            "GET /refresh?game=30s": "Force refresh",
         }
     })
 
@@ -391,16 +471,19 @@ def home():
 def status():
     return jsonify({
         "ready": predictor.ready,
-        "transformer_models": list(predictor.tf_models.keys()),
-        "ten_feature_model": predictor.feat_model is not None,
-        "version": "5.0",
+        "models": {
+            "markov": True,
+            "xgboost": predictor.xgb.trained,
+            "sklearn_rf_gb": predictor.sklearn.trained,
+        },
+        "version": "9.0",
         "buffer": {k: len(v) for k, v in buffer.cache.items()},
     })
 
 @app.route('/buffer')
 def show_buffer():
     game = request.args.get('game', '30s')
-    nums, issues = buffer.get_numbers_display(game, count=25)
+    nums, issues = buffer.get_numbers(game, count=25)
     return jsonify({
         "game": game,
         "count": len(nums),
@@ -413,7 +496,7 @@ def show_buffer():
 def refresh():
     game = request.args.get('game', '30s')
     buffer.update(game)
-    nums, issues = buffer.get_numbers_display(game, count=25)
+    nums, _ = buffer.get_numbers(game, count=25)
     return jsonify({"game": game, "count": len(nums), "latest": nums[0] if nums else "none"})
 
 @app.route('/predict/auto')
@@ -431,7 +514,7 @@ def predict_get():
         numbers = [int(x.strip()) for x in nums_str.split(',') if x.strip().isdigit()]
     except:
         return jsonify({"error": "Invalid numbers"}), 400
-    return jsonify(predictor.predict_with_numbers(numbers, game))
+    return jsonify(predictor.predict(numbers, game))
 
 @app.route('/predict', methods=['POST'])
 def predict_post():
@@ -440,7 +523,7 @@ def predict_post():
     game = data.get('game', '30s')
     if not numbers:
         return jsonify(predictor.auto_predict(game))
-    return jsonify(predictor.predict_with_numbers(numbers, game))
+    return jsonify(predictor.predict(numbers, game))
 
 def auto_refresh():
     while True:
@@ -453,13 +536,30 @@ def auto_refresh():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("  WinGo Transformer v5 - 10 Feature + Ensemble")
+    print("  WinGo Predictor v9 - Markov + XGBoost + Sklearn")
+    print("  3 AI Models + Majority Voting")
     print("=" * 50)
-    predictor.load_models()
     print("  Initializing buffer...")
     buffer.init_cache()
-    t = threading.Thread(target=auto_refresh, daemon=True)
-    t.start()
+
+    # Train on all games
+    for game in ["30s", "1m"]:
+        nums, _ = buffer.get_all(game)
+        if len(nums) >= 10:
+            print(f"  Training on {game} ({len(nums)} records)...")
+            predictor.train_all(nums)
+            break
+    else:
+        # Fallback: train on whatever we have
+        nums, _ = buffer.get_all("30s")
+        if len(nums) >= 10:
+            predictor.train_all(nums)
+
+    t1 = threading.Thread(target=auto_refresh, daemon=True)
+    t1.start()
+    t2 = threading.Thread(target=auto_retrain, daemon=True)
+    t2.start()
+
     port = int(os.environ.get('PORT', 5000))
     print(f"  Port: {port} | Ready: {predictor.ready}")
     print("=" * 50)
