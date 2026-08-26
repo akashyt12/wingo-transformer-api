@@ -204,18 +204,19 @@ class XGBoostModel:
 
     def train(self, numbers, window=10):
         X, y = [], []
-        for i in range(window, len(numbers) - 1):
+        min_samples = min(30, len(numbers) - window - 1)
+        for i in range(max(window, 5), len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 50:
+        if len(X) < 10:
             return False
         X = np.array(X)
         y = np.array(y)
         self.model = XGBClassifier(
-            n_estimators=200,
-            max_depth=6,
+            n_estimators=min(200, max(50, len(X))),
+            max_depth=min(6, max(3, len(X) // 10)),
             learning_rate=0.1,
             use_label_encoder=False,
             eval_metric='mlogloss',
@@ -257,15 +258,17 @@ class SklearnEnsemble:
 
     def train(self, numbers, window=10):
         X, y = [], []
-        for i in range(window, len(numbers) - 1):
+        for i in range(max(window, 5), len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 50:
+        if len(X) < 10:
             return False
         X = np.array(X)
         y = np.array(y)
+        self.rf = RandomForestClassifier(n_estimators=min(200, max(50, len(X))), max_depth=min(8, max(3, len(X) // 10)), random_state=42)
+        self.gb = GradientBoostingClassifier(n_estimators=min(150, max(30, len(X))), max_depth=min(5, max(2, len(X) // 15)), random_state=42)
         self.rf.fit(X, y)
         self.gb.fit(X, y)
         self.trained = True
