@@ -104,6 +104,8 @@ class MarkovModel:
     def __init__(self, order=2):
         self.order = order
         self.transitions = {}
+        self.transitions_1 = {}
+        self.unigram = Counter()
 
     def train(self, numbers):
         self.transitions = {}
@@ -113,19 +115,47 @@ class MarkovModel:
             if state not in self.transitions:
                 self.transitions[state] = Counter()
             self.transitions[state][next_num] += 1
+        # Also train order-1 as fallback
+        self.transitions_1 = {}
+        for i in range(len(numbers) - 1):
+            state = (numbers[i],)
+            next_num = numbers[i + 1]
+            if state not in self.transitions_1:
+                self.transitions_1[state] = Counter()
+            self.transitions_1[state][next_num] += 1
+        # Unigram fallback
+        self.unigram = Counter(numbers[-20:])
 
     def predict(self, numbers):
-        if len(numbers) < self.order:
-            return None, {}
-        state = tuple(numbers[-self.order:])
-        if state not in self.transitions:
-            return None, {}
-        total = sum(self.transitions[state].values())
-        probs = {}
-        for n in range(10):
-            probs[n] = round(self.transitions[state].get(n, 0) / total * 100, 1)
-        best = max(self.transitions[state], key=self.transitions[state].get)
-        return best, probs
+        # Try order-2 first
+        if len(numbers) >= self.order:
+            state = tuple(numbers[-self.order:])
+            if state in self.transitions:
+                total = sum(self.transitions[state].values())
+                probs = {}
+                for n in range(10):
+                    probs[n] = round(self.transitions[state].get(n, 0) / total * 100, 1)
+                best = max(self.transitions[state], key=self.transitions[state].get)
+                return best, probs
+        # Fallback order-1
+        if len(numbers) >= 1:
+            state = (numbers[-1],)
+            if state in self.transitions_1:
+                total = sum(self.transitions_1[state].values())
+                probs = {}
+                for n in range(10):
+                    probs[n] = round(self.transitions_1[state].get(n, 0) / total * 100, 1)
+                best = max(self.transitions_1[state], key=self.transitions_1[state].get)
+                return best, probs
+        # Fallback unigram
+        if self.unigram:
+            total = sum(self.unigram.values())
+            probs = {}
+            for n in range(10):
+                probs[n] = round(self.unigram.get(n, 0) / total * 100, 1)
+            best = self.unigram.most_common(1)[0][0]
+            return best, probs
+        return None, {}
 
 # ============================================================
 # FEATURE ENGINEERING
