@@ -476,11 +476,11 @@ predictor = EnsemblePredictor()
 
 def auto_retrain():
     while True:
-        time.sleep(180)  # 3 minutes
+        time.sleep(400)
         try:
             for game in ["30s", "1m"]:
                 nums, _ = buffer.get_all(game)
-                if len(nums) >= 10:
+                if len(nums) >= 30:
                     predictor.train_all(nums)
                     print(f"  [AUTO RETRAIN] {game} - {len(nums)} records")
         except Exception as e:
