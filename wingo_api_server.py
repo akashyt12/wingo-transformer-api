@@ -344,6 +344,8 @@ class EnsemblePredictor:
         self.xgb = XGBoostModel()
         self.sklearn = SklearnEnsemble()
         self.ready = False
+        self.pred_count = 0
+        self.retrain_interval = 5
 
     def train_all(self, numbers):
         print("  [TRAINING] Markov...")
@@ -451,6 +453,19 @@ class EnsemblePredictor:
         result["cached_records"] = len(nums)
         result["latest_period"] = issues[-1] if issues else "unknown"
         result["recent_numbers"] = nums_display
+
+        # Retrain every 5 predictions
+        self.pred_count += 1
+        if self.pred_count >= self.retrain_interval:
+            self.pred_count = 0
+            try:
+                all_nums, _ = buffer.get_all(game)
+                if len(all_nums) >= 10:
+                    self.train_all(all_nums)
+                    result["retrained"] = True
+            except Exception as e:
+                print(f"  [RETRAIN ERROR] {e}")
+
         return result
 
 predictor = EnsemblePredictor()
