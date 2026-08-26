@@ -265,66 +265,63 @@ class Predictor:
         if len(numbers) < 10:
             return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
 
-        votes = {}
-        confidences = {}
+        # --- Frequency analysis (last 20 numbers) ---
+        recent = numbers[-20:]
+        freq = {}
+        for n in range(10):
+            freq[n] = recent.count(n)
 
-        # --- Transformer prediction ---
+        # --- Weighted score: recent numbers matter more ---
+        scores = {}
+        for n in range(10):
+            score = 0
+            for i, num in enumerate(recent):
+                if num == n:
+                    score += (i + 1)  # more recent = higher weight
+            scores[n] = score
+
+        # --- Gap analysis: numbers that haven't appeared in a while ---
+        gaps = {}
+        for n in range(10):
+            gap = 0
+            for i in range(len(recent) - 1, -1, -1):
+                if recent[i] == n:
+                    break
+                gap += 1
+            gaps[n] = gap
+
+        # --- Transformer BIG/SMALL hint ---
         model = self.tf_models.get(game, self.tf_models.get("1m"))
+        tf_hint = None
         if model and len(numbers) >= SEQUENCE_LEN:
             seq = numbers[-SEQUENCE_LEN:]
             x = torch.tensor([seq], dtype=torch.long).to(DEVICE)
             with torch.no_grad():
                 bs_logits = model(x)
-            tf_pred = "BIG" if bs_logits.argmax(1).item() == 1 else "SMALL"
-            tf_conf = F.softmax(bs_logits, dim=1).max().item()
-            votes["transformer"] = tf_pred
-            confidences["transformer"] = round(tf_conf * 100, 1)
-        elif model:
-            seq = [0] * (SEQUENCE_LEN - len(numbers)) + numbers
-            x = torch.tensor([seq], dtype=torch.long).to(DEVICE)
-            with torch.no_grad():
-                bs_logits = model(x)
-            tf_pred = "BIG" if bs_logits.argmax(1).item() == 1 else "SMALL"
-            tf_conf = F.softmax(bs_logits, dim=1).max().item()
-            votes["transformer"] = tf_pred
-            confidences["transformer"] = round(tf_conf * 100, 1)
+            tf_hint = "BIG" if bs_logits.argmax(1).item() == 1 else "SMALL"
 
-        # --- 10-Feature prediction ---
-        feat = extract_10_features(numbers, len(numbers) - 1, 10)
-        if feat and self.feat_model:
-            X = torch.FloatTensor([feat])
-            with torch.no_grad():
-                feat_logits = self.feat_model(X)
-            feat_pred = "BIG" if feat_logits.argmax(1).item() == 1 else "SMALL"
-            feat_conf = F.softmax(feat_logits, dim=1).max().item()
-            votes["ten_feature"] = feat_pred
-            confidences["ten_feature"] = round(feat_conf * 100, 1)
+        # --- Combine scores ---
+        final_scores = {}
+        for n in range(10):
+            s = scores[n] * 2 + gaps[n] * 1.5 + freq[n] * 3
+            if tf_hint == "BIG" and n >= 5:
+                s *= 1.3
+            elif tf_hint == "SMALL" and n <= 4:
+                s *= 1.3
+            final_scores[n] = round(s, 2)
 
-        # --- Ensemble vote ---
-        big_c = sum(1 for v in votes.values() if v == "BIG")
-        small_c = sum(1 for v in votes.values() if v == "SMALL")
-
-        if big_c > small_c:
-            final = "BIG"
-        elif small_c > big_c:
-            final = "SMALL"
-        else:
-            final = votes.get("transformer", votes.get("ten_feature", "BIG"))
-
-        confidence = round(((max(big_c, small_c) / max(len(votes), 1)) * 70 +
-                           confidences.get("transformer", 50) * 0.3), 1)
-
-        # --- Suggested numbers ---
-        suggested = get_suggested_numbers(feat) if feat else ([7] if final == "BIG" else [2])
+        # --- Pick best number ---
+        best_num = max(final_scores, key=final_scores.get)
+        max_score = max(final_scores.values())
+        confidence = round((final_scores[best_num] / max(max_score, 1)) * 100, 1)
+        confidence = min(confidence, 95.0)
 
         return {
-            "prediction": final,
-            "suggested_numbers": suggested,
+            "prediction": str(best_num),
+            "number": best_num,
             "confidence": confidence,
-            "votes": votes,
-            "confidences": confidences,
-            "big_votes": big_c,
-            "small_votes": small_c,
+            "scores": final_scores,
+            "tf_hint": tf_hint,
             "game": game,
             "sequence": numbers[-10:],
         }
