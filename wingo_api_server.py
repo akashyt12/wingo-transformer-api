@@ -310,8 +310,10 @@ class Predictor:
                 s *= 1.3
             final_scores[n] = round(s, 2)
 
-        # --- Pick best number ---
-        best_num = max(final_scores, key=final_scores.get)
+        # --- Pick top 5 numbers ---
+        sorted_nums = sorted(final_scores, key=final_scores.get, reverse=True)
+        top5 = sorted_nums[:5]
+        best_num = top5[0]
         max_score = max(final_scores.values())
         confidence = round((final_scores[best_num] / max(max_score, 1)) * 100, 1)
         confidence = min(confidence, 95.0)
@@ -319,6 +321,7 @@ class Predictor:
         return {
             "prediction": str(best_num),
             "number": best_num,
+            "suggested_numbers": top5,
             "confidence": confidence,
             "scores": final_scores,
             "tf_hint": tf_hint,
