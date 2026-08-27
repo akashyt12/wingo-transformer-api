@@ -238,7 +238,7 @@ class XGBoostModel:
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 10:
+        if len(X) < 5:
             return False
         X = np.array(X)
         y = np.array(y)
@@ -291,7 +291,7 @@ class SklearnEnsemble:
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 10:
+        if len(X) < 5:
             return False
         X = np.array(X)
         y = np.array(y)
