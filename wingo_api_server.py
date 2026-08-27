@@ -159,7 +159,7 @@ class MarkovModel:
 # FEATURE ENGINEERING
 # ============================================================
 
-def build_features(numbers, idx, window=10):
+def build_features(numbers, idx, window=5):
     if idx < window:
         return None
     w = numbers[idx - window:idx + 1]
@@ -230,21 +230,21 @@ class XGBoostModel:
         self.model = None
         self.trained = False
 
-    def train(self, numbers, window=10):
+    def train(self, numbers, window=5):
         X, y = [], []
         min_samples = min(30, len(numbers) - window - 1)
-        for i in range(max(window, 5), len(numbers) - 1):
+        for i in range(max(window, 3), len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 10:
+        if len(X) < 5:
             return False
         X = np.array(X)
         y = np.array(y)
         self.model = XGBClassifier(
-            n_estimators=min(200, max(50, len(X))),
-            max_depth=min(6, max(3, len(X) // 10)),
+            n_estimators=min(200, max(30, len(X))),
+            max_depth=min(6, max(2, len(X) // 10)),
             learning_rate=0.1,
             use_label_encoder=False,
             eval_metric='mlogloss',
@@ -255,7 +255,7 @@ class XGBoostModel:
         self.trained = True
         return True
 
-    def predict(self, numbers, window=10):
+    def predict(self, numbers, window=5):
         if not self.trained or len(numbers) < window:
             return None, {}
         feat = build_features(numbers, len(numbers) - 1, window)
@@ -284,25 +284,25 @@ class SklearnEnsemble:
         self.gb = GradientBoostingClassifier(n_estimators=150, max_depth=5, random_state=42)
         self.trained = False
 
-    def train(self, numbers, window=10):
+    def train(self, numbers, window=5):
         X, y = [], []
-        for i in range(max(window, 5), len(numbers) - 1):
+        for i in range(max(window, 3), len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 10:
+        if len(X) < 5:
             return False
         X = np.array(X)
         y = np.array(y)
-        self.rf = RandomForestClassifier(n_estimators=min(200, max(50, len(X))), max_depth=min(8, max(3, len(X) // 10)), random_state=42)
-        self.gb = GradientBoostingClassifier(n_estimators=min(150, max(30, len(X))), max_depth=min(5, max(2, len(X) // 15)), random_state=42)
+        self.rf = RandomForestClassifier(n_estimators=min(200, max(30, len(X))), max_depth=min(8, max(2, len(X) // 10)), random_state=42)
+        self.gb = GradientBoostingClassifier(n_estimators=min(150, max(20, len(X))), max_depth=min(5, max(2, len(X) // 15)), random_state=42)
         self.rf.fit(X, y)
         self.gb.fit(X, y)
         self.trained = True
         return True
 
-    def predict(self, numbers, window=10):
+    def predict(self, numbers, window=5):
         if not self.trained or len(numbers) < window:
             return None, {}
         feat = build_features(numbers, len(numbers) - 1, window)
@@ -361,8 +361,8 @@ class EnsemblePredictor:
         try:
             if not self.ready:
                 return {"error": "Models not trained"}
-            if len(numbers) < 10:
-                return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
+            if len(numbers) < 5:
+                return {"error": f"Need at least 5 numbers, got {len(numbers)}"}
 
             # Get predictions from all 3 models
             m1_num, m1_probs = None, {}
@@ -459,7 +459,7 @@ class EnsemblePredictor:
             buffer.update(game)
             nums, issues = buffer.get_numbers(game, count=30)
             nums_display, issues_display = buffer.get_numbers(game, count=10)
-            if len(nums) < 10:
+            if len(nums) < 5:
                 return {"error": "Not enough data", "cached": len(nums),
                         "prediction": "0", "number": 0, "suggested_numbers": [0,1,2,3,4]}
             result = self.predict(nums, game)
@@ -474,7 +474,7 @@ class EnsemblePredictor:
                 self.pred_count = 0
                 try:
                     all_nums, _ = buffer.get_all(game)
-                    if len(all_nums) >= 10:
+                    if len(all_nums) >= 5:
                         self.train_all(all_nums[-30:])
                         result["retrained"] = True
                 except Exception as e:
@@ -621,7 +621,7 @@ def auto_refresh():
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("  WinGo Predictor v9 - Markov + XGBoost + Sklearn")
+    print("  WinGo Predictor v10 - Markov + XGBoost + Sklearn")
     print("  3 AI Models + Majority Voting")
     print("=" * 50)
     print("  Initializing buffer...")
@@ -630,14 +630,14 @@ if __name__ == '__main__':
     # Train on all games
     for game in ["30s", "1m"]:
         nums, _ = buffer.get_all(game)
-        if len(nums) >= 10:
+        if len(nums) >= 5:
             print(f"  Training on {game} ({len(nums)} records)...")
             predictor.train_all(nums[-30:])
             break
     else:
         # Fallback: train on whatever we have
         nums, _ = buffer.get_all("30s")
-        if len(nums) >= 10:
+        if len(nums) >= 5:
             predictor.train_all(nums[-30:])
 
     t1 = threading.Thread(target=auto_refresh, daemon=True)
