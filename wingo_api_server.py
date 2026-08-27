@@ -24,7 +24,7 @@ from sklearn.preprocessing import LabelEncoder
 # GAME DATA - LIVE API
 # ============================================================
 
-GAME_API_BASE = "https://bright-host-spot.lovable.app/api/public"
+GAME_API_BASE = "https://draw.ar-lottery01.com/WinGo"
 GAME_ENDPOINTS = {
     "30s": "WinGo_30S",
     "1m":  "WinGo_1M",
@@ -36,11 +36,11 @@ class GameDataBuffer:
     def __init__(self):
         self.cache = {}
         self.lock = threading.Lock()
-        self.max_size = 50
+        self.max_size = 200
 
     def fetch_latest(self, game_key="30s"):
         endpoint = GAME_ENDPOINTS.get(game_key, "WinGo_30S")
-        url = f"{GAME_API_BASE}/{endpoint}"
+        url = f"{GAME_API_BASE}/{endpoint}/GetHistoryIssuePage.json?pageSize=50&pageNo=1"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
