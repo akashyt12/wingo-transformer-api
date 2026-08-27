@@ -229,39 +229,52 @@ class XGBoostModel:
     def __init__(self):
         self.model = None
         self.trained = False
+        self.window = 5
+        self.le = LabelEncoder()
 
-    def train(self, numbers, window=10):
+    def train(self, numbers):
+        window = self.window
         X, y = [], []
-        min_samples = min(30, len(numbers) - window - 1)
-        for i in range(max(window, 5), len(numbers) - 1):
+        for i in range(window, len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 5:
+        if len(X) < 4:
             return False
         X = np.array(X)
         y = np.array(y)
+        y_encoded = self.le.fit_transform(y)
         self.model = XGBClassifier(
             n_estimators=min(200, max(50, len(X))),
             max_depth=min(6, max(3, len(X) // 10)),
             learning_rate=0.1,
-            use_label_encoder=False,
             eval_metric='mlogloss',
             random_state=42,
             verbosity=0
         )
-        self.model.fit(X, y)
+        self.model.fit(X, y_encoded)
         self.trained = True
         return True
 
-    def predict(self, numbers, window=10):
+    def predict(self, numbers):
+        window = self.window
         if not self.trained or len(numbers) < window:
             return None, {}
         feat = build_features(numbers, len(numbers) - 1, window)
         if feat is None:
             return None, {}
         X = np.array([feat])
+        probs = self.model.predict_proba(X)[0]
+        classes = self.le.inverse_transform(self.model.classes_)
+        prob_dict = {}
+        for i, c in enumerate(classes):
+            prob_dict[int(c)] = round(float(probs[i]) * 100, 1)
+        for n in range(10):
+            if n not in prob_dict:
+                prob_dict[n] = 0.0
+        best = int(classes[np.argmax(probs)])
+        return best, prob_dict
         probs = self.model.predict_proba(X)[0]
         classes = self.model.classes_
         prob_dict = {}
@@ -283,26 +296,31 @@ class SklearnEnsemble:
         self.rf = RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42)
         self.gb = GradientBoostingClassifier(n_estimators=150, max_depth=5, random_state=42)
         self.trained = False
+        self.window = 5
+        self.le = LabelEncoder()
 
-    def train(self, numbers, window=10):
+    def train(self, numbers):
+        window = self.window
         X, y = [], []
-        for i in range(max(window, 5), len(numbers) - 1):
+        for i in range(window, len(numbers) - 1):
             feat = build_features(numbers, i, window)
             if feat is not None:
                 X.append(feat)
                 y.append(numbers[i + 1])
-        if len(X) < 5:
+        if len(X) < 4:
             return False
         X = np.array(X)
         y = np.array(y)
+        y_encoded = self.le.fit_transform(y)
         self.rf = RandomForestClassifier(n_estimators=min(200, max(50, len(X))), max_depth=min(8, max(3, len(X) // 10)), random_state=42)
         self.gb = GradientBoostingClassifier(n_estimators=min(150, max(30, len(X))), max_depth=min(5, max(2, len(X) // 15)), random_state=42)
-        self.rf.fit(X, y)
-        self.gb.fit(X, y)
+        self.rf.fit(X, y_encoded)
+        self.gb.fit(X, y_encoded)
         self.trained = True
         return True
 
-    def predict(self, numbers, window=10):
+    def predict(self, numbers):
+        window = self.window
         if not self.trained or len(numbers) < window:
             return None, {}
         feat = build_features(numbers, len(numbers) - 1, window)
@@ -310,15 +328,12 @@ class SklearnEnsemble:
             return None, {}
         X = np.array([feat])
 
-        # RF prediction
         rf_probs = self.rf.predict_proba(X)[0]
-        rf_classes = self.rf.classes_
+        rf_classes = self.le.inverse_transform(self.rf.classes_)
 
-        # GB prediction
         gb_probs = self.gb.predict_proba(X)[0]
-        gb_classes = self.gb.classes_
+        gb_classes = self.le.inverse_transform(self.gb.classes_)
 
-        # Average probabilities
         avg_probs = {}
         for n in range(10):
             p1 = 0.0
@@ -362,7 +377,7 @@ class EnsemblePredictor:
             if not self.ready:
                 return {"error": "Models not trained"}
             if len(numbers) < 10:
-                return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
+                return {"error": f"Need at least 5 numbers, got {len(numbers)}"}
 
             # Get predictions from all 3 models
             m1_num, m1_probs = None, {}
@@ -459,7 +474,7 @@ class EnsemblePredictor:
             buffer.update(game)
             nums, issues = buffer.get_numbers(game, count=30)
             nums_display, issues_display = buffer.get_numbers(game, count=10)
-            if len(nums) < 10:
+            if len(nums) < 5:
                 return {"error": "Not enough data", "cached": len(nums),
                         "prediction": "0", "number": 0, "suggested_numbers": [0,1,2,3,4]}
             result = self.predict(nums, game)
