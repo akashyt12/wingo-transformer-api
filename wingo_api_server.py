@@ -28,8 +28,6 @@ GAME_API_BASE = "https://draw.ar-lottery01.com/WinGo"
 GAME_ENDPOINTS = {
     "30s": "WinGo_30S",
     "1m":  "WinGo_1M",
-    "3m":  "WinGo_3M",
-    "5m":  "WinGo_5M",
 }
 
 class GameDataBuffer:
@@ -614,7 +612,7 @@ def handle_404(e):
 
 def auto_refresh():
     while True:
-        time.sleep(1)
+        time.sleep(25)
         try:
             for game in GAME_ENDPOINTS:
                 buffer.update(game)
