@@ -360,113 +360,133 @@ class EnsemblePredictor:
         print("  [READY] All models trained!")
 
     def predict(self, numbers, game="30s"):
-        if not self.ready:
-            return {"error": "Models not trained"}
-        if len(numbers) < 10:
-            return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
+        try:
+            if not self.ready:
+                return {"error": "Models not trained"}
+            if len(numbers) < 10:
+                return {"error": f"Need at least 10 numbers, got {len(numbers)}"}
 
-        # Get predictions from all 3 models
-        m1_num, m1_probs = self.markov.predict(numbers)
-        m2_num, m2_probs = self.xgb.predict(numbers)
-        m3_num, m3_probs = self.sklearn.predict(numbers)
+            # Get predictions from all 3 models
+            m1_num, m1_probs = None, {}
+            m2_num, m2_probs = None, {}
+            m3_num, m3_probs = None, {}
 
-        votes = {}
-        all_probs = {}
+            try:
+                m1_num, m1_probs = self.markov.predict(numbers)
+            except Exception as e:
+                print(f"  [MARKOV ERROR] {e}")
 
-        if m1_num is not None:
-            votes["markov"] = m1_num
-            all_probs["markov"] = m1_probs
-        if m2_num is not None:
-            votes["xgboost"] = m2_num
-            all_probs["xgboost"] = m2_probs
-        if m3_num is not None:
-            votes["sklearn"] = m3_num
-            all_probs["sklearn"] = m3_probs
+            try:
+                m2_num, m2_probs = self.xgb.predict(numbers)
+            except Exception as e:
+                print(f"  [XGBOOST ERROR] {e}")
 
-        if not votes:
-            return {"error": "All models failed"}
+            try:
+                m3_num, m3_probs = self.sklearn.predict(numbers)
+            except Exception as e:
+                print(f"  [SKLEARN ERROR] {e}")
 
-        # --- Majority voting ---
-        vote_counts = Counter(votes.values())
-        majority_num = vote_counts.most_common(1)[0][0]
-        majority_count = vote_counts.most_common(1)[0][1]
+            votes = {}
+            all_probs = {}
 
-        # --- Combined probability (average all models) ---
-        combined_probs = {}
-        for n in range(10):
-            p_list = []
-            for model_name, probs in all_probs.items():
-                if n in probs:
-                    p_list.append(probs[n])
-            combined_probs[n] = round(np.mean(p_list), 1) if p_list else 0.0
+            if m1_num is not None:
+                votes["markov"] = int(m1_num)
+                all_probs["markov"] = {int(k): float(v) for k, v in m1_probs.items()}
+            if m2_num is not None:
+                votes["xgboost"] = int(m2_num)
+                all_probs["xgboost"] = {int(k): float(v) for k, v in m2_probs.items()}
+            if m3_num is not None:
+                votes["sklearn"] = int(m3_num)
+                all_probs["sklearn"] = {int(k): float(v) for k, v in m3_probs.items()}
 
-        # --- Confidence ---
-        confidence = round(majority_count / len(votes) * 100, 1)
+            if not votes:
+                return {"error": "All models failed", "prediction": "0", "number": 0,
+                        "suggested_numbers": [0, 1, 2, 3, 4], "confidence": 0}
 
-        # --- Top 5 numbers with BIG/SMALL majority ---
-        sorted_nums = sorted(combined_probs, key=combined_probs.get, reverse=True)
+            # --- Majority voting ---
+            vote_counts = Counter(votes.values())
+            majority_num = int(vote_counts.most_common(1)[0][0])
+            majority_count = vote_counts.most_common(1)[0][1]
 
-        # Determine hint from combined scores
-        big_score = sum(combined_probs.get(n, 0) for n in range(5, 10))
-        small_score = sum(combined_probs.get(n, 0) for n in range(0, 5))
-        tf_hint = "BIG" if big_score > small_score else "SMALL"
+            # --- Combined probability (average all models) ---
+            combined_probs = {}
+            for n in range(10):
+                p_list = []
+                for model_name, probs in all_probs.items():
+                    if n in probs:
+                        p_list.append(probs[n])
+                combined_probs[n] = round(float(np.mean(p_list)), 1) if p_list else 0.0
 
-        if tf_hint == "BIG":
-            big_nums = [n for n in sorted_nums if n >= 5]
-            small_nums = [n for n in sorted_nums if n <= 4]
-            top5 = big_nums[:3] + small_nums[:2]
+            # --- Confidence ---
+            confidence = round(majority_count / max(len(votes), 1) * 100, 1)
+
+            # --- Top 5 numbers with BIG/SMALL majority ---
+            sorted_nums = sorted(combined_probs, key=combined_probs.get, reverse=True)
+
+            big_score = sum(combined_probs.get(n, 0) for n in range(5, 10))
+            small_score = sum(combined_probs.get(n, 0) for n in range(0, 5))
+            tf_hint = "BIG" if big_score > small_score else "SMALL"
+
+            if tf_hint == "BIG":
+                big_nums = [n for n in sorted_nums if n >= 5]
+                small_nums = [n for n in sorted_nums if n <= 4]
+                top5 = big_nums[:3] + small_nums[:2]
+            else:
+                small_nums = [n for n in sorted_nums if n <= 4]
+                big_nums = [n for n in sorted_nums if n >= 5]
+                top5 = small_nums[:3] + big_nums[:2]
+
             if len(top5) < 5:
                 top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
-        else:
-            small_nums = [n for n in sorted_nums if n <= 4]
-            big_nums = [n for n in sorted_nums if n >= 5]
-            top5 = small_nums[:3] + big_nums[:2]
-            if len(top5) < 5:
-                top5 += [n for n in sorted_nums if n not in top5][:5 - len(top5)]
 
-        return {
-            "prediction": str(majority_num),
-            "number": majority_num,
-            "suggested_numbers": top5,
-            "confidence": confidence,
-            "models": votes,
-            "model_confidences": {
-                "markov": m1_probs.get(m1_num, 0) if m1_num is not None else 0,
-                "xgboost": m2_probs.get(m2_num, 0) if m2_num is not None else 0,
-                "sklearn": m3_probs.get(m3_num, 0) if m3_num is not None else 0,
-            },
-            "combined_probs": combined_probs,
-            "tf_hint": tf_hint,
-            "vote_counts": dict(vote_counts),
-            "game": game,
-            "sequence": numbers[-10:],
-        }
+            return {
+                "prediction": str(majority_num),
+                "number": majority_num,
+                "suggested_numbers": top5,
+                "confidence": confidence,
+                "models": votes,
+                "combined_probs": combined_probs,
+                "tf_hint": tf_hint,
+                "vote_counts": dict(vote_counts),
+                "game": game,
+                "sequence": numbers[-10:],
+            }
+        except Exception as e:
+            print(f"  [PREDICT ERROR] {e}")
+            return {"error": str(e), "prediction": "0", "number": 0,
+                    "suggested_numbers": [0, 1, 2, 3, 4], "confidence": 0}
 
     def auto_predict(self, game="30s"):
-        buffer.update(game)
-        nums, issues = buffer.get_numbers(game, count=50)
-        nums_display, issues_display = buffer.get_numbers(game, count=10)
-        if len(nums) < 10:
-            return {"error": "Not enough data", "cached": len(nums)}
-        result = self.predict(nums, game)
-        result["source"] = "bright-host-spot_live"
-        result["cached_records"] = len(nums)
-        result["latest_period"] = issues[-1] if issues else "unknown"
-        result["recent_numbers"] = nums_display
+        try:
+            buffer.update(game)
+            nums, issues = buffer.get_numbers(game, count=50)
+            nums_display, issues_display = buffer.get_numbers(game, count=10)
+            if len(nums) < 10:
+                return {"error": "Not enough data", "cached": len(nums),
+                        "prediction": "0", "number": 0, "suggested_numbers": [0,1,2,3,4]}
+            result = self.predict(nums, game)
+            result["source"] = "bright-host-spot_live"
+            result["cached_records"] = len(nums)
+            result["latest_period"] = issues[-1] if issues else "unknown"
+            result["recent_numbers"] = nums_display
 
-        # Retrain every 5 predictions
-        self.pred_count += 1
-        if self.pred_count >= self.retrain_interval:
-            self.pred_count = 0
-            try:
-                all_nums, _ = buffer.get_all(game)
-                if len(all_nums) >= 10:
-                    self.train_all(all_nums)
-                    result["retrained"] = True
-            except Exception as e:
-                print(f"  [RETRAIN ERROR] {e}")
+            # Retrain every 5 predictions
+            self.pred_count += 1
+            if self.pred_count >= self.retrain_interval:
+                self.pred_count = 0
+                try:
+                    all_nums, _ = buffer.get_all(game)
+                    if len(all_nums) >= 10:
+                        self.train_all(all_nums)
+                        result["retrained"] = True
+                except Exception as e:
+                    print(f"  [RETRAIN ERROR] {e}")
 
-        return result
+            return result
+        except Exception as e:
+            print(f"  [AUTO PREDICT ERROR] {e}")
+            return {"error": str(e), "prediction": "0", "number": 0,
+                    "suggested_numbers": [0,1,2,3,4], "confidence": 0}
 
 predictor = EnsemblePredictor()
 
@@ -549,29 +569,48 @@ def refresh():
 
 @app.route('/predict/auto')
 def auto_predict():
-    game = request.args.get('game', '30s')
-    return jsonify(predictor.auto_predict(game))
+    try:
+        game = request.args.get('game', '30s')
+        return jsonify(predictor.auto_predict(game))
+    except Exception as e:
+        return jsonify({"error": str(e), "prediction": "0", "number": 0,
+                        "suggested_numbers": [0,1,2,3,4]})
 
 @app.route('/predict')
 def predict_get():
-    game = request.args.get('game', '30s')
-    nums_str = request.args.get('numbers', '')
-    if not nums_str:
-        return jsonify(predictor.auto_predict(game))
     try:
+        game = request.args.get('game', '30s')
+        nums_str = request.args.get('numbers', '')
+        if not nums_str:
+            return jsonify(predictor.auto_predict(game))
         numbers = [int(x.strip()) for x in nums_str.split(',') if x.strip().isdigit()]
-    except:
-        return jsonify({"error": "Invalid numbers"}), 400
-    return jsonify(predictor.predict(numbers, game))
+        return jsonify(predictor.predict(numbers, game))
+    except Exception as e:
+        return jsonify({"error": str(e), "prediction": "0", "number": 0,
+                        "suggested_numbers": [0,1,2,3,4]})
 
 @app.route('/predict', methods=['POST'])
 def predict_post():
-    data = request.get_json() or {}
-    numbers = data.get('numbers', [])
-    game = data.get('game', '30s')
-    if not numbers:
-        return jsonify(predictor.auto_predict(game))
-    return jsonify(predictor.predict(numbers, game))
+    try:
+        data = request.get_json() or {}
+        numbers = data.get('numbers', [])
+        game = data.get('game', '30s')
+        if not numbers:
+            return jsonify(predictor.auto_predict(game))
+        return jsonify(predictor.predict(numbers, game))
+    except Exception as e:
+        return jsonify({"error": str(e), "prediction": "0", "number": 0,
+                        "suggested_numbers": [0,1,2,3,4]})
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify({"error": "Internal error", "prediction": "0", "number": 0,
+                    "suggested_numbers": [0,1,2,3,4]}), 200
+
+@app.errorhandler(404)
+def handle_404(e):
+    return jsonify({"error": "Not found", "prediction": "0", "number": 0,
+                    "suggested_numbers": [0,1,2,3,4]}), 200
 
 def auto_refresh():
     while True:
