@@ -36,7 +36,7 @@ class GameDataBuffer:
     def __init__(self):
         self.cache = {}
         self.lock = threading.Lock()
-        self.max_size = 200
+        self.max_size = 30
 
     def fetch_latest(self, game_key="30s"):
         endpoint = GAME_ENDPOINTS.get(game_key, "WinGo_30S")
@@ -459,13 +459,13 @@ class EnsemblePredictor:
     def auto_predict(self, game="30s"):
         try:
             buffer.update(game)
-            nums, issues = buffer.get_numbers(game, count=50)
+            nums, issues = buffer.get_numbers(game, count=30)
             nums_display, issues_display = buffer.get_numbers(game, count=10)
             if len(nums) < 10:
                 return {"error": "Not enough data", "cached": len(nums),
                         "prediction": "0", "number": 0, "suggested_numbers": [0,1,2,3,4]}
             result = self.predict(nums, game)
-            result["source"] = "bright-host-spot_live"
+            result["source"] = "ar-lottery01_live"
             result["cached_records"] = len(nums)
             result["latest_period"] = issues[-1] if issues else "unknown"
             result["recent_numbers"] = nums_display
@@ -477,7 +477,7 @@ class EnsemblePredictor:
                 try:
                     all_nums, _ = buffer.get_all(game)
                     if len(all_nums) >= 10:
-                        self.train_all(all_nums)
+                        self.train_all(all_nums[-30:])
                         result["retrained"] = True
                 except Exception as e:
                     print(f"  [RETRAIN ERROR] {e}")
@@ -500,8 +500,8 @@ def auto_retrain():
         try:
             for game in ["30s", "1m"]:
                 nums, _ = buffer.get_all(game)
-                if len(nums) >= 30:
-                    predictor.train_all(nums)
+                if len(nums) >= 10:
+                    predictor.train_all(nums[-30:])
                     print(f"  [AUTO RETRAIN] {game} - {len(nums)} records")
         except Exception as e:
             print(f"  [RETRAIN ERROR] {e}")
@@ -634,13 +634,13 @@ if __name__ == '__main__':
         nums, _ = buffer.get_all(game)
         if len(nums) >= 10:
             print(f"  Training on {game} ({len(nums)} records)...")
-            predictor.train_all(nums)
+            predictor.train_all(nums[-30:])
             break
     else:
         # Fallback: train on whatever we have
         nums, _ = buffer.get_all("30s")
         if len(nums) >= 10:
-            predictor.train_all(nums)
+            predictor.train_all(nums[-30:])
 
     t1 = threading.Thread(target=auto_refresh, daemon=True)
     t1.start()
